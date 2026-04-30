@@ -1,17 +1,5 @@
-//! # Type Conversions in Soroban
-//!
-//! This contract demonstrates comprehensive type conversion patterns in Soroban,
-//! including Val conversions, TryFrom/TryInto implementations, native to Soroban
-//! type conversions, and proper error handling strategies.
-//!
-//! ## Key Concepts
-//!
-//! - **Val Conversions**: Working with Soroban's universal value type
-//! - **TryFrom/TryInto**: Safe conversion patterns with error handling
-//! - **Native to Soroban**: Converting Rust types to Soroban SDK types
-//! - **Error Handling**: Proper error propagation and custom error types
-
 #![no_std]
+use soroban_sdk::{contract, contractimpl, contracterror, Env, String, TryFromVal, Val};
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Bytes, Env, IntoVal, Map, String,
@@ -59,7 +47,7 @@ pub struct Config {
 }
 
 #[contract]
-pub struct TypeConversionsContract;
+pub struct ConversionContract;
 
 #[contractimpl]
 impl TypeConversionsContract {

@@ -4,7 +4,6 @@
 //! exercised, matching the pattern used across the rest of the cookbook.
 
 #![cfg(test)]
-
 use super::*;
 use soroban_sdk::{
     symbol_short, testutils::Address as _, Address, Bytes, Env, IntoVal, Map, String, Symbol, Val,
