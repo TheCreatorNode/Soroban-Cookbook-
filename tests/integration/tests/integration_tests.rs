@@ -8,7 +8,14 @@
 #![cfg(not(target_arch = "wasm32"))]
 #![cfg(test)]
 
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, IntoVal, Symbol, Vec};
+use multi_party_auth;
+use soroban_sdk::{
+    symbol_short,
+    testutils::{Address as _, IssuerFlags},
+    token::{StellarAssetClient, TokenClient},
+    Address, Env, IntoVal, Symbol, Vec,
+};
+use token_wrapper;
 
 // ---------------------------------------------------------------------------
 // Test 1: Multi-Contract Workflow — Hello World + Storage + Events counter
@@ -77,7 +84,60 @@ fn test_greeting_system_workflow() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: Authentication + Storage Integration
+// Test 2: Token Wrapper End-to-End Flow
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_token_wrapper_multi_user_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let asset = env.register_stellar_asset_contract_v2(admin.clone());
+    asset.issuer().set_flag(IssuerFlags::ClawbackEnabledFlag);
+
+    let underlying_id = asset.address();
+    let underlying = TokenClient::new(&env, &underlying_id);
+    let underlying_admin = StellarAssetClient::new(&env, &underlying_id);
+
+    let wrapper_id = env.register_contract(None, token_wrapper::TokenWrapper);
+    let wrapper = token_wrapper::TokenWrapperClient::new(&env, &wrapper_id);
+    wrapper.initialize(&underlying_id);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    underlying_admin.mint(&alice, &600);
+    underlying_admin.mint(&bob, &400);
+
+    assert_eq!(wrapper.wrap(&alice, &250), 250);
+    assert_eq!(wrapper.wrap(&bob, &100), 100);
+    wrapper.transfer(&alice, &bob, &50);
+
+    assert_eq!(wrapper.balance(&alice), 200);
+    assert_eq!(wrapper.balance(&bob), 150);
+    assert_eq!(underlying.balance(&alice), 350);
+    assert_eq!(underlying.balance(&bob), 300);
+    assert_eq!(underlying.balance(&wrapper_id), 350);
+
+    assert_eq!(wrapper.unwrap(&bob, &120), 30);
+
+    assert_eq!(wrapper.balance(&bob), 30);
+    assert_eq!(underlying.balance(&bob), 420);
+    assert_eq!(underlying.balance(&wrapper_id), 230);
+
+    let backing = wrapper.backing();
+    assert!(backing.fully_backed);
+    assert!(backing.exactly_backed);
+    assert_eq!(backing.surplus, 0);
+
+    assert_eq!(
+        wrapper.try_unwrap(&alice, &999),
+        Err(Ok(token_wrapper::WrapperError::InsufficientWrappedBalance))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: Authentication + Storage Integration
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -200,7 +260,181 @@ fn test_authenticated_storage_workflow() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Cross-Contract Coordination — Auth + Events + Storage
+// Test 6: Validation + Custom Errors Integration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_validation_and_errors_integration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let validation_id = env.register_contract(None, validation_patterns::ValidationContract);
+    let errors_id = env.register_contract(None, custom_errors::CustomErrorsContract);
+
+    let owner = Address::generate(&env);
+
+    // Step 1: Initialize validation contract
+    let _: Result<(), validation_patterns::ValidationError> = env.invoke_contract(
+        &validation_id,
+        &symbol_short!("initialize"),
+        Vec::from_array(&env, [owner.clone().into_val(&env)]),
+    );
+
+    // Step 2: Test validation parameters (Success)
+    let _: Result<(), validation_patterns::ValidationError> = env.invoke_contract(
+        &validation_id,
+        &Symbol::new(&env, "validate_amount_parameters"),
+        Vec::from_array(
+            &env,
+            [
+                100i128.into_val(&env),
+                50i128.into_val(&env),
+                200i128.into_val(&env),
+            ],
+        ),
+    );
+
+    // Step 3: Test custom errors (Failure)
+    let error_result: Result<(), custom_errors::ContractError> = env.invoke_contract(
+        &errors_id,
+        &Symbol::new(&env, "validate_input"),
+        Vec::from_array(&env, [0i64.into_val(&env)]),
+    );
+    assert!(error_result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Ajo Factory + Authentication Lifecycle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ajo_factory_lifecycle_integration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let factory_id = env.register_contract(None, ajo_factory::AjoFactory);
+    let auth_id = env.register_contract(None, authentication::AuthContract);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+
+    // Step 1: Initialize auth contract
+    env.invoke_contract::<()>(
+        &auth_id,
+        &Symbol::new(&env, "initialize"),
+        Vec::from_array(&env, [admin.clone().into_val(&env)]),
+    );
+
+    // Step 2: Initialize Ajo Factory with Ajo contract WASM
+    let wasm_hash = env.deployer().upload_contract_wasm(ajo_factory::Ajo::WASM);
+
+    env.invoke_contract::<Result<(), ajo_factory::FactoryError>>(
+        &factory_id,
+        &Symbol::new(&env, "initialize"),
+        Vec::from_array(&env, [wasm_hash.into_val(&env)]),
+    )
+    .unwrap();
+
+    // Step 3: Create Ajo via factory
+    let ajo_address: Address = env
+        .invoke_contract::<Result<Address, ajo_factory::FactoryError>>(
+            &factory_id,
+            &Symbol::new(&env, "create_ajo"),
+            Vec::from_array(
+                &env,
+                [
+                    1000i128.into_val(&env),
+                    10u32.into_val(&env),
+                    creator.clone().into_val(&env),
+                ],
+            ),
+        )
+        .unwrap();
+
+    // Step 4: Verify Ajo was created and tracked
+    let deployed_ajos: Vec<Address> = env.invoke_contract(
+        &factory_id,
+        &Symbol::new(&env, "get_deployed_ajos"),
+        Vec::new(&env),
+    );
+    assert_eq!(deployed_ajos.len(), 1);
+    assert_eq!(deployed_ajos.get(0).unwrap(), ajo_address);
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Multi-Sig Governance + Events Tracking
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_multi_sig_governance_integration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let multisig_id = env.register_contract(None, multi_sig_patterns::MultiPartyAuth);
+    let events_id = env.register_contract(None, events_counter::Contract);
+
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    let signers = Vec::from_array(&env, [signer1.clone(), signer2.clone()]);
+
+    // Step 1: Initialize multi-sig
+    env.invoke_contract::<Result<(), multi_sig_patterns::AuthError>>(
+        &multisig_id,
+        &Symbol::new(&env, "initialize"),
+        Vec::from_array(&env, [2u32.into_val(&env), signers.into_val(&env)]),
+    )
+    .unwrap();
+
+    // Step 2: Create a proposal
+    let proposal_id: u32 = env
+        .invoke_contract::<Result<u32, multi_sig_patterns::AuthError>>(
+            &multisig_id,
+            &Symbol::new(&env, "create_proposal"),
+            Vec::from_array(&env, [signer1.clone().into_val(&env)]),
+        )
+        .unwrap();
+
+    // Step 3: Track governance action via events counter
+    env.invoke_contract::<()>(&events_id, &symbol_short!("increment"), Vec::new(&env));
+
+    // Step 4: Approve from both signers
+    env.invoke_contract::<Result<(), multi_sig_patterns::AuthError>>(
+        &multisig_id,
+        &Symbol::new(&env, "approve"),
+        Vec::from_array(
+            &env,
+            [proposal_id.into_val(&env), signer1.clone().into_val(&env)],
+        ),
+    )
+    .unwrap();
+    env.invoke_contract::<Result<(), multi_sig_patterns::AuthError>>(
+        &multisig_id,
+        &Symbol::new(&env, "approve"),
+        Vec::from_array(
+            &env,
+            [proposal_id.into_val(&env), signer2.clone().into_val(&env)],
+        ),
+    )
+    .unwrap();
+
+    // Step 5: Execute
+    let success: bool = env
+        .invoke_contract::<Result<bool, multi_sig_patterns::AuthError>>(
+            &multisig_id,
+            &Symbol::new(&env, "execute"),
+            Vec::from_array(&env, [proposal_id.into_val(&env), signer1.into_val(&env)]),
+        )
+        .unwrap();
+    assert!(success);
+
+    // Verify events tracking
+    let evt_count: u32 =
+        env.invoke_contract(&events_id, &Symbol::new(&env, "get_number"), Vec::new(&env));
+    assert_eq!(evt_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: Cross-Contract Coordination — Auth + Events + Storage
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -283,7 +517,7 @@ fn test_cross_contract_event_tracking() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Storage Type Comparison — End-to-End
+// Test 5: Storage Type Comparison — End-to-End
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -604,4 +838,127 @@ fn test_coordinated_state_management() {
     let evt_count: u32 =
         env.invoke_contract(&events_id, &Symbol::new(&env, "get_number"), Vec::new(&env));
     assert_eq!(evt_count, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Multi-Party Auth — 2-of-3 proposal approval
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_multi_party_auth_2_of_3() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, multi_party_auth::MultiPartyAuthContract);
+    let client = multi_party_auth::MultiPartyAuthContractClient::new(&env, &contract_id);
+
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    let signer3 = Address::generate(&env);
+
+    let all_signers =
+        soroban_sdk::Vec::from_array(&env, [signer1.clone(), signer2.clone(), signer3.clone()]);
+    let proposal_id = Symbol::new(&env, "prop_2of3");
+
+    // Setup 2-of-3 threshold
+    client.setup_proposal(&proposal_id, &2u32, &all_signers);
+
+    // Only signer1 and signer2 approve — threshold met
+    let approvers = soroban_sdk::Vec::from_array(&env, [signer1.clone(), signer2.clone()]);
+    client.proposal_approval(&proposal_id, &approvers);
+
+    // Verify both signers were required to authorize
+    let auths = env.auths();
+    let auth_addresses: std::vec::Vec<Address> =
+        auths.iter().map(|(addr, _)| addr.clone()).collect();
+    assert!(auth_addresses.contains(&signer1));
+    assert!(auth_addresses.contains(&signer2));
+    assert!(!auth_addresses.contains(&signer3));
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Multi-Party Auth — 3-of-3 proposal approval
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_multi_party_auth_3_of_3() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, multi_party_auth::MultiPartyAuthContract);
+    let client = multi_party_auth::MultiPartyAuthContractClient::new(&env, &contract_id);
+
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    let signer3 = Address::generate(&env);
+
+    let all_signers =
+        soroban_sdk::Vec::from_array(&env, [signer1.clone(), signer2.clone(), signer3.clone()]);
+    let proposal_id = Symbol::new(&env, "prop_3of3");
+
+    // Setup 3-of-3 threshold — all must approve
+    client.setup_proposal(&proposal_id, &3u32, &all_signers);
+
+    let approvers =
+        soroban_sdk::Vec::from_array(&env, [signer1.clone(), signer2.clone(), signer3.clone()]);
+    client.proposal_approval(&proposal_id, &approvers);
+
+    let auths = env.auths();
+    let auth_addresses: std::vec::Vec<Address> =
+        auths.iter().map(|(addr, _)| addr.clone()).collect();
+    assert!(auth_addresses.contains(&signer1));
+    assert!(auth_addresses.contains(&signer2));
+    assert!(auth_addresses.contains(&signer3));
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Multi-Party Auth — cross-function auth check (escrow + proposal)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_multi_party_auth_cross_function() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, multi_party_auth::MultiPartyAuthContract);
+    let client = multi_party_auth::MultiPartyAuthContractClient::new(&env, &contract_id);
+
+    let buyer = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let signer3 = Address::generate(&env);
+
+    // --- Escrow flow ---
+    // Step 1: buyer funds escrow (requires buyer auth)
+    client.sequential_auth_escrow(&buyer, &seller, &500i128);
+
+    let step_key = multi_party_auth::DataKey::EscrowStep(buyer.clone(), seller.clone());
+    let step: u32 = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&step_key).unwrap_or(0)
+    });
+    assert_eq!(step, 2);
+
+    // Step 2: joint release (requires both buyer and seller auth)
+    client.sequential_auth_escrow(&buyer, &seller, &500i128);
+
+    let step_after: u32 = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&step_key).unwrap_or(0)
+    });
+    assert_eq!(step_after, 0);
+
+    // --- Proposal flow on the same contract instance ---
+    let all_signers =
+        soroban_sdk::Vec::from_array(&env, [buyer.clone(), seller.clone(), signer3.clone()]);
+    let proposal_id = Symbol::new(&env, "cross_prop");
+
+    client.setup_proposal(&proposal_id, &2u32, &all_signers);
+
+    // buyer and seller (who just completed escrow) now co-approve a proposal
+    let approvers = soroban_sdk::Vec::from_array(&env, [buyer.clone(), seller.clone()]);
+    client.proposal_approval(&proposal_id, &approvers);
+
+    let auths = env.auths();
+    let auth_addresses: std::vec::Vec<Address> =
+        auths.iter().map(|(addr, _)| addr.clone()).collect();
+    assert!(auth_addresses.contains(&buyer));
+    assert!(auth_addresses.contains(&seller));
 }
