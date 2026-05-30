@@ -1,8 +1,29 @@
 # Token Examples
 
-Fungible tokens, standards, wrappers.
+Fungible tokens, standards, wrappers, and portfolio utilities.
 
-## 📋 Coming Soon
+## Implemented Examples
+
+### Token Wrapper
+**Wrap an existing token with 1:1 internal shares**.
+
+**Key Concepts:**
+- Deposit and unwrap flows
+- Backing checks
+- Wrapper balance accounting
+
+### Multi-Token Balance Manager
+**Register many token contracts and batch portfolio reads/writes**.
+
+**Key Concepts:**
+- Token registry metadata
+- `batch_balance(user, tokens)` read aggregation
+- Batched transfers across registered tokens
+- Handling SEP-41, Stellar asset, and custom metadata sources
+
+Source: `examples/tokens/multi-token-balance-manager/`
+
+## Coming Soon
 
 ### SEP-41 Token
 **Soroban token interface**.
@@ -12,18 +33,7 @@ Fungible tokens, standards, wrappers.
 - Transfer/approval
 - Metadata
 
-### Token Wrapper
-**Wrap native assets**.
-
-**Key Concepts:**
-- Deposit/mint
-- Burn/withdraw
-- Pausable emergency
-
-## Placeholder
-`examples/tokens/` directory ready.
-
 ## Prerequisites
 - [Basics](../basics.md), [Auth](../basics/03-authentication/)
 
-## End of Examples Section 🎉
+## End of Examples Section

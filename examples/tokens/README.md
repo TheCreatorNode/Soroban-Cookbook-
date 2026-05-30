@@ -6,6 +6,7 @@ This category contains examples related to fungible tokens, including implementa
 
 - **Token Standards**: Implementations of official Stellar token standards like SEP-41.
 - **[Token Wrapper](./token-wrapper/)**: A 1:1 wrapper around an existing token with deposit, withdraw, backing checks, and invariant tests.
+- **[Multi-Token Balance Manager](./multi-token-balance-manager/)**: A registry for portfolio-style balance reads and batched token transfers across multiple token contracts.
 - **Distribution Patterns**: Examples of vesting schedules and airdrop contracts.
 
 ## Planned Examples
